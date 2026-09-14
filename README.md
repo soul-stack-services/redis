@@ -9,6 +9,21 @@ create ─┬─ provision.yml ── vm.created → bootstrap.issued → ssh.ru
         └─ deploy.yml ───── state.present ×2 → apply destiny:redis → instance.pinged → user.present
 ```
 
+## Status: a debugging tool, not an acceptance path
+
+Decided 2026-09-14. This repository is kept for **cheap engine debugging** — a whole
+`create` on a workstation instead of a billed VM per cycle — and it is not grown and not
+published. Acceptance runs remotely, against the services that already exist and the
+provider that already serves them; a local stand cannot see what is site-specific
+(teleport instead of a static key, a closed cloud-init, resource-manager ids, profiles),
+so anything that breaks only there is green here.
+
+The division is the point, not a compromise: **locally, engine defects; remotely,
+acceptance.** The one defect this repository has already found —
+[a missing bounded retry on the direct SSH transport](#three-things-a-live-run-cost) —
+could not have been found in the cloud, because the cloud path is teleport and teleport's
+dialer retries. It cost forty minutes and no hardware.
+
 ## Why this exists next to the engine's redis example
 
 The engine ships [`examples/service/redis`](https://github.com/soul-stack/soul-stack/tree/main/examples/service/redis),
