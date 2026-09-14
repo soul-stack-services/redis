@@ -1,0 +1,127 @@
+name: add_user
+description: >-
+  Add one Redis ACL user to a running incarnation, or change the rights of one that is
+  already there. The password is never input: it is generated into Vault on the first run
+  for that name and kept on every later one.
+
+# One AclUser, the same type an element of the create input carries, so the rights pattern
+# is one rule rather than two that drift. The password is deliberately not a field — see
+# the mint step below.
+input:
+  user:
+    $type: AclUser
+    required: true
+    description: >-
+      The ACL user to reconcile. A name that is already present has its rights and state
+      updated and keeps its password.
+
+# ★ NOT `extends: scenario-create`. That contract is the create request — owners,
+# environment, version, the whole redis.conf surface — and inheriting it here would demand
+# all of it on a run that changes one account.
+#
+# The consequence is this copy of the create rule, and it is not optional: the AclUser
+# pattern is a token-SHAPE filter that passes `>secret` and `nopass`, so without the rule
+# below a day-2 caller reaches users.acl with what create refuses. The service-account
+# names are a literal list because `validate:` sees the request only — vars are not in its
+# context, and the same list lives in vars/30-acl-users.yaml.
+validate:
+  - that: "!input.user.perms.matches('(^| )[(]?([<>#!]|(on|off|reset|nopass|resetpass)( |$))')"
+    message: "perms must not carry a password (>… <… #… !…), reset, on/off or
+      nopass/resetpass — an account's state and password are set by separate parameters.
+      Leave only rights in perms: keys, channels and commands."
+  - that: "!(input.user.name in ['default', 'default_admin', 'monitoring'])"
+    message: "That name belongs to a service account this service creates for itself.
+      Pick another one."
+
+compute:
+  admin_user: "${ 'default_admin' }"
+  acl_names: "${ vars.system_acl_users.map(u, u.name) }"
+  # Filter-then-append rather than a merge: state.redis_users is an ARRAY, and this gives
+  # the upsert semantics the name implies — a run for a name already there replaces that
+  # one element and leaves the rest of the set alone.
+  users_new: >-
+    ${ (has(incarnation.state.redis_users)
+          ? incarnation.state.redis_users.filter(u, u.name != input.user.name)
+          : [])
+       + [{ 'name':  input.user.name,
+            'perms': input.user.perms,
+            'state': default(input.user.state, 'on') }] }
+
+tasks:
+  # ★ READ-ONLY on purpose, and the absence of a `password` property is what makes it so:
+  # secret resolution then requires an EXISTING value, so an incarnation whose service
+  # accounts are missing fails loudly here instead of being handed fresh passwords that the
+  # live instance — which this run is about to authenticate against — knows nothing about.
+  - name: Resolve the service accounts' passwords
+    module: core.state.set
+    register: system_acl_users
+    params:
+      field: system_acl_users
+      value: "${ default(incarnation.state.system_acl_users, []) }"
+
+  # Only the requested name carries a `password` property, so only it can be minted; every
+  # other element is passed without one and therefore requires its existing value. That is
+  # what makes a repeat run for an existing user an update of rights and not a rotation of
+  # a credential live clients already hold.
+  - name: Mint the new user's password, keep every other one
+    module: core.state.set
+    register: redis_users
+    params:
+      field: redis_users
+      value: >-
+        ${ compute.users_new.map(u, u.name == input.user.name
+             ? { 'name':     u.name,
+                 'perms':    u.perms,
+                 'state':    u.state,
+                 'password': generate_secret({'length': 32, 'charset': 'alphanumeric'}) }
+             : { 'name': u.name, 'perms': u.perms, 'state': u.state }) }
+
+  # The file on disk, so the account survives a restart. The destiny prints users.acl
+  # whole, which is why the service accounts are merged back in here: rendering only the
+  # operator's users would drop default_admin from the file, and the next restart would
+  # leave this service unable to authenticate to its own instance.
+  #
+  # `install:` is not optional on a re-run: without it the destiny's package branch
+  # installs with no apt repository declared, and the pinned version is not in Debian's
+  # own — that is an `apt-get` exit 100 several steps from here.
+  - name: Re-render users.acl with the new set
+    apply:
+      destiny: redis
+      input:
+        version:  "${ incarnation.state.redis_version }"
+        install:  "${ vars.install_package }"
+        conf_dir: "${ vars.conf_dir }"
+        data_dir: "${ vars.data_dir }"
+        config:   "${ incarnation.state.redis_config }"
+        users: >-
+          ${ merge(
+               merge(vars.system_acl_users.map(u, {
+                 u.name: {
+                   'perms':    u.perms,
+                   'state':    'on',
+                   'password': merge(register.system_acl_users.effective.map(s, { s.name: s.password }))[u.name]
+                 }
+               })),
+               merge(compute.users_new.map(u, {
+                 u.name: {
+                   'perms':    u.perms,
+                   'state':    u.state,
+                   'password': merge(register.redis_users.effective.map(r, { r.name: r.password }))[u.name]
+                 }
+               }))
+             ) }
+        sentinel_enabled: false
+
+  # And on the live instance, without a restart. The rendered file is not re-read by a
+  # running Redis — users.acl is deliberately outside the restart's onchanges — so the file
+  # above is the durable half and this step is the effective one.
+  - name: Apply the user to the live instance
+    module: redis.user.present
+    params:
+      addr: "127.0.0.1:6379"
+      username: "${ compute.admin_user }"
+      password: "${ merge(register.system_acl_users.effective.map(u, { u.name: u.password }))[compute.admin_user] }"
+      name:  "${ input.user.name }"
+      perms: "${ input.user.perms }"
+      state: "${ default(input.user.state, 'on') }"
+      user_password: "${ merge(register.redis_users.effective.map(r, { r.name: r.password }))[input.user.name] }"

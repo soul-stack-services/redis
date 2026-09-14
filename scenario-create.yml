@@ -2,6 +2,13 @@
 # pulls it in with `extends: scenario-create` and adds only its own delta — an inherited
 # key cannot be overridden (section_key_conflict).
 #
+# ★ WHERE THE HOSTS COME FROM IS NOT SHARED, and that is why `machine_count` and
+# `compute.expected_hosts` live in each scenario instead of here: `create` makes its own
+# machines and counts them, `create_from_souls` is handed a roster and counts that. With
+# one definition here the other scenario would either inherit a parameter with no meaning
+# for it, or silently ignore one the caller passed — and an inherited key cannot be
+# overridden, so there is no third option.
+#
 # The file name and its place are fixed by the platform: `extends: <name>` reads exactly
 # `<service root>/<name>.yml`, hyphen rather than underscore and no subdirectories
 # (NIM-694). `form:` is not part of it — it is not merged, each scenario draws its own.
@@ -29,16 +36,6 @@ input:
       Redis version. The list is closed: every value is published by the apt repository
       named in vars.install_package, so all of them install out of the box. Redis 8 and
       later carry the modules built in, so nothing is fetched from a module mirror.
-  machine_count:
-    type: integer
-    required: false
-    default: 1
-    min: 1
-    max: 3
-    description: >-
-      How many machines to create. Each one gets its own standalone Redis with the same
-      config and users — there is no replication here. Replication, sentinel and cluster
-      are the engine's `examples/service/redis`; this service is about the create path.
   memory_mb:
     type: integer
     required: false
@@ -85,7 +82,6 @@ compute:
   # add later. It is a service account, not an operator's: `validate:` below keeps an
   # operator from taking the name.
   admin_user: "${ 'default_admin' }"
-  expected_hosts: "${ int(input.machine_count) }"
   form_settings: >-
     ${ merge(
          has(input.memory_mb)

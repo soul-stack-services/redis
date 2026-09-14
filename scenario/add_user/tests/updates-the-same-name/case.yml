@@ -1,0 +1,69 @@
+name: add_user for a name already there replaces that one element and adds nothing
+
+fixtures:
+  default_destiny_source: "file://../../destiny/{name}"
+  hosts:
+    - sid: redis-demo-1
+      soulprint:
+        network: { primary_ip: 192.168.122.51 }
+        os: { arch: amd64, codename: bookworm }
+  vars:
+    install_package:
+      method: package
+      repo_uri:    "https://packages.redis.io/deb"
+      gpg_key_url: "https://packages.redis.io/gpg"
+      gpg_key_sha256: ""
+      version_pin: ""
+    conf_dir: /etc/redis
+    data_dir: /var/lib/redis
+    system_acl_users:
+      - { name: default_admin, perms: "~* &* +@all" }
+      - { name: monitoring, perms: "~* +@read +info -@dangerous" }
+  state:
+    owners: [team-cache]
+    environment: dev
+    redis_version: "8.10.1"
+    operational_status: running
+    machine_count: 1
+    memory_mb: 0
+    persistence: rdb
+    redis_config:
+      maxmemory:        "256mb"
+      maxmemory-policy: noeviction
+      maxclients:       10000
+      timeout:          300
+      save:             "900 1 300 10 60 10000"
+      appendonly:       "no"
+    redis_users:
+      - { name: app, perms: "~app:* +@read", state: "on" }
+    system_acl_users:
+      - { name: default_admin }
+      - { name: monitoring }
+  # Same name, wider rights and blocked: the upsert has to carry BOTH changed fields, and
+  # `state` is the one a plain append would silently leave at its old value.
+  input:
+    user: { name: app, perms: "~app:* +@read +@write", state: "off" }
+
+mocks:
+  register:
+    system_acl_users:
+      effective:
+        - { name: default_admin, password: default-admin-secret-pass }
+        - { name: monitoring,    password: monitoring-secret-pass }
+    redis_users:
+      effective:
+        - { name: app, password: app-secret-pass }
+
+assert:
+  task_present:
+    - module: redis.user.present
+      params_subset:
+        name:  app
+        perms: "~app:* +@read +@write"
+        state: "off"
+  state_after:
+    # ONE element. An append without the filter would leave two records for one account,
+    # and which of them reaches users.acl on the next render is then a question about map
+    # ordering.
+    redis_users:
+      - { name: app, perms: "~app:* +@read +@write", state: "off" }

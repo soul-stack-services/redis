@@ -1,43 +1,67 @@
 # redis — a service that raises its own machines
 
 `create` provisions virtual machines through a machine provider, installs the Soul agent
-on them, and rolls out one standalone Redis per machine. That is the whole subject: the
-path from no machines at all to a Redis answering `PING`.
+on them, and rolls out one standalone Redis per machine: the path from no machines at all
+to a Redis answering `PING`. Two scenarios stand beside it — one that deploys onto
+machines somebody else raised, and one day-2 operation.
 
 ```
-create ─┬─ provision.yml ── vm.created → bootstrap.issued → ssh.run → soul.registered
-        └─ deploy.yml ───── state.present ×2 → apply destiny:redis → instance.pinged → user.present
+create            ─┬─ provision.yml ── vm.created → bootstrap.issued → ssh.run → soul.registered
+                   └─ deploy.yml ───── state.present ×2 → apply destiny:redis → instance.pinged → user.present
+create_from_souls  ─── deploy.yml       (the same rollout; the roster is given, not built)
+add_user           ─── state.set ×2 → apply destiny:redis → user.present
 ```
 
-## Status: a debugging tool, not an acceptance path
+`create_from_souls` exists because the machine half and the Redis half fail for different
+reasons and a run that does both can only be debugged from one end. It declares its roster
+with `source: { roster: true }` ([ADR-0081](https://github.com/soul-stack/soul-stack/blob/main/docs/adr/0081-roster-at-create.md)),
+which is what lets `POST /v1/incarnations` bind the hosts before the run starts.
 
-Decided 2026-09-14. This repository is kept for **cheap engine debugging** — a whole
-`create` on a workstation instead of a billed VM per cycle — and it is published as a
-worked reference rather than grown into a product. Acceptance runs remotely, against the
-services that already exist and the provider that already serves them; a local stand
-cannot see what is site-specific (teleport instead of a static key, a closed cloud-init,
-resource-manager ids, profiles), so anything that breaks only there is green here.
+## Status: a debugging tool for the site, and the engine's gate subject
 
-The division is the point, not a compromise: **locally, engine defects; remotely,
-acceptance.** The one defect this repository has already found —
+Decided 2026-09-14, in two steps on the same day.
+
+This repository is kept for **cheap engine debugging** — a whole `create` on a workstation
+instead of a billed VM per cycle — and it is published as a worked reference rather than
+grown into a product. Site acceptance runs remotely, against the services that already
+exist and the provider that already serves them; a local stand cannot see what is
+site-specific (teleport instead of a static key, a closed cloud-init, resource-manager ids,
+profiles), so anything that breaks only there is green here. **Locally, engine defects;
+remotely, acceptance.** The one defect this repository has already found —
 [a missing bounded retry on the direct SSH transport](#three-things-a-live-run-cost) —
 could not have been found in the cloud, because the cloud path is teleport and teleport's
 dialer retries. It cost forty minutes and no hardware.
 
-## Why this exists next to the engine's redis example
+Then NIM-876 gave it a second duty: **the engine's blocking pre-tag gate runs this
+repository.** `make e2e-live-gate` clones it at a commit the engine pins, registers it as a
+service and drives `create_from_souls` and `add_user` against a live Redis in a container.
+What that buys the engine is a subject with a real `state_schema`, declared secrets, a
+destiny brick and a plugin — which is what a green gate has to mean, because the engine cut
+its own bundled redis example in NIM-871 and everything a service proved left with it.
 
-The engine ships [`examples/service/redis`](https://github.com/soul-stack/soul-stack/tree/main/examples/service/redis),
-and it is a **different subject**, not an earlier draft of this one:
+Two consequences for anyone editing here. A change that breaks `create_from_souls` or
+`add_user` breaks the engine's release gate, so those two are load-bearing and not
+examples. And the gate follows a **pinned commit**, so a change reaches it only when
+someone bumps the pin in `tests/e2e-live/harness/servicecatalog.go` — a fix here is not
+live over there until then, deliberately, so that a push cannot red somebody's release.
+
+## Why this exists after the engine cut its own redis example
+
+The engine used to ship [`examples/service/redis`](https://github.com/soul-stack/soul-stack/tree/main/examples/service/redis)
+— a different subject, not an earlier draft of this one:
 
 | | subject | machines |
 |---|---|---|
-| the engine's `examples/service/redis` | the depth of the service DSL — `state_schema`, a fifteen-rung migration ladder, twelve scenarios, day-2 operations, ~180 L0 cases | roll onto an existing roster |
+| the engine's former `examples/service/redis` | the depth of the service DSL — `state_schema`, a fifteen-rung migration ladder, twelve scenarios, day-2 operations, ~180 L0 cases | roll onto an existing roster |
 | this repository | the bootstrap path, end to end | **created by the run** |
 
-The engine's example lost its provisioning path in NIM-761, when the CloudDriver contract
-went; what it does now is roll the redis role onto a roster somebody else supplied. This
-service is the other half. Topology is deliberately absent here — replication, sentinel
-and cluster live over there, and duplicating them would make two examples of one thing.
+**That example is gone** (NIM-871, 2026-09-14): a service is its own repository, and
+bundling one made the engine's gate depend on a service's lifecycle. So the division above
+is history, and the part of it that mattered to the engine — a live service being created
+and then operated — is what `create_from_souls` and `add_user` here now carry.
+
+Topology is still deliberately absent: replication, sentinel and cluster belong to a
+service whose subject they are, and this repository's subject is the bootstrap path.
 
 What is copied from over there rather than reinvented: the `redis` destiny brick and the
 `redis` plugin. This repository holds a service, not a role.

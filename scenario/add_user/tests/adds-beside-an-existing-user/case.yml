@@ -1,0 +1,92 @@
+name: add_user keeps the users already there and renders the service accounts back in
+
+fixtures:
+  default_destiny_source: "file://../../destiny/{name}"
+  hosts:
+    - sid: redis-demo-1
+      soulprint:
+        network: { primary_ip: 192.168.122.51 }
+        os: { arch: amd64, codename: bookworm }
+  vars:
+    install_package:
+      method: package
+      repo_uri:    "https://packages.redis.io/deb"
+      gpg_key_url: "https://packages.redis.io/gpg"
+      gpg_key_sha256: ""
+      version_pin: ""
+    conf_dir: /etc/redis
+    data_dir: /var/lib/redis
+    system_acl_users:
+      - { name: default_admin, perms: "~* &* +@all" }
+      - { name: monitoring, perms: "~* +@read +info -@dangerous" }
+  # A day-2 run reads the incarnation rather than a create request: version and the whole
+  # redis.conf come from here, and passwords do not — they are `type: secret` and live in
+  # Vault, resolved through the two registers below.
+  state:
+    owners: [team-cache]
+    environment: dev
+    redis_version: "8.10.1"
+    operational_status: running
+    machine_count: 1
+    memory_mb: 0
+    persistence: rdb
+    redis_config:
+      maxmemory:        "256mb"
+      maxmemory-policy: noeviction
+      maxclients:       10000
+      timeout:          300
+      save:             "900 1 300 10 60 10000"
+      appendonly:       "no"
+    redis_users:
+      - { name: app, perms: "~app:* +@read +@write -@dangerous", state: "on" }
+    system_acl_users:
+      - { name: default_admin }
+      - { name: monitoring }
+  input:
+    user: { name: reporter, perms: "~metrics:* +@read", state: "on" }
+
+mocks:
+  register:
+    system_acl_users:
+      effective:
+        - { name: default_admin, password: default-admin-secret-pass }
+        - { name: monitoring,    password: monitoring-secret-pass }
+    redis_users:
+      effective:
+        - { name: app,      password: app-secret-pass }
+        - { name: reporter, password: reporter-secret-pass }
+
+assert:
+  task_present:
+    # ★ THE SUBJECT: the rendered file carries FOUR accounts. The destiny prints users.acl
+    # whole, so a render that passed only the operator's users would drop default_admin —
+    # and the drop shows up one restart later, as this service failing to authenticate to
+    # its own instance rather than as a failing run.
+    - module: core.file.rendered
+      params_subset:
+        path: /etc/redis/users.acl
+    - module: redis.user.present
+      params_subset:
+        addr: "127.0.0.1:6379"
+        username: default_admin
+        name:  reporter
+        perms: "~metrics:* +@read"
+        state: "on"
+  # Nothing here touches machines or the roster: a day-2 run that reached one of these
+  # would be re-running create's body.
+  task_absent:
+    - module: vmlocal.vm.created
+    - module: core.bootstrap.issued
+    - module: core.ssh.run
+    - module: core.soul.registered
+    - module: redis.instance.pinged
+  state_after:
+    # Both, in order: the one that was there, then the one this run added. A dropped
+    # filter-and-append would leave only the new one, and the deployed client that holds
+    # `app` would keep working until the next render.
+    redis_users:
+      - { name: app,      perms: "~app:* +@read +@write -@dangerous", state: "on" }
+      - { name: reporter, perms: "~metrics:* +@read", state: "on" }
+    system_acl_users:
+      - { name: default_admin }
+      - { name: monitoring }

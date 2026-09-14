@@ -6,6 +6,24 @@ description: >-
 
 extends: scenario-create
 
+input:
+  machine_count:
+    type: integer
+    required: false
+    default: 1
+    min: 1
+    max: 3
+    description: >-
+      How many machines to create. Each one gets its own standalone Redis with the same
+      config and users — there is no replication here. Replication, sentinel and cluster
+      are the engine's `examples/service/redis`; this service is about the create path.
+
+compute:
+  # What the roster is supposed to look like once this run has built it. deploy.yml holds
+  # the outcome against it, and `state.yml` records it — so a machine that never came up
+  # is a red run rather than an incarnation claiming hosts it does not have.
+  expected_hosts: "${ int(input.machine_count) }"
+
 form:
   sections:
     - key: ownership

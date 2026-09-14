@@ -1,0 +1,73 @@
+name: create_from_souls
+create: true
+description: >-
+  Deploy Redis onto machines that already carry the Soul agent. The rollout is the same
+  one `create` performs; what differs is who raised the hosts.
+
+extends: scenario-create
+
+# ★ `source: { roster: true }` is a DECLARATION, not a picker hint ([ADR-0081]). It marks
+# the field whose value IS the composition of the incarnation: on POST /v1/incarnations
+# keeper binds these SIDs into `incarnation_membership` after inserting the row and BEFORE
+# starting this run. The order is load-bearing — a run resolves its roster from that
+# relation at start and aborts `no_hosts` on an empty one, so a scenario cannot bind its
+# own hosts from the inside. Without this key the scenario is unreachable through the API.
+input:
+  hosts:
+    type: array
+    required: true
+    min_items: 1
+    unique: true
+    items:
+      type: string
+      format: sid
+      source: { roster: true }
+    description: >-
+      The machines to deploy onto — onboarded, online souls. Each one gets its own
+      standalone Redis with the same config and users.
+
+compute:
+  # The roster is given rather than built, so the count comes from the request. The input
+  # is a journal of what the incarnation was created on; the live composition is the
+  # membership relation, which the Hosts tab may edit afterwards — deploy.yml therefore
+  # still checks `soulprint.hosts` against this number instead of trusting it.
+  expected_hosts: "${ size(input.hosts) }"
+
+form:
+  sections:
+    - key: ownership
+      title: "Ownership"
+      fields:
+        - { name: owners, label: "Owners", placeholder: "team-cache" }
+        - { name: environment, label: "Environment" }
+    - key: machines
+      title: "Machines"
+      fields:
+        - { name: hosts, label: "Hosts" }
+    - key: redis
+      title: "Redis"
+      fields:
+        - { name: version, label: "Version" }
+    - key: resources
+      title: "Resources"
+      fields:
+        - { name: memory_mb, label: "Memory for Redis, MB", placeholder: "512" }
+        - { name: maxmemory_policy, label: "Eviction policy" }
+    - key: durability
+      title: "Durability"
+      fields:
+        - { name: persistence, label: "Persistence" }
+    - key: users
+      title: "Users"
+      fields:
+        - { name: users, label: "ACL users" }
+    - key: config
+      title: "Configuration"
+      collapsed: true
+      fields:
+        - { name: redis_settings, label: "redis.conf directives" }
+
+# No provision.yml: nothing is created, nothing is installed, no token is minted. Every
+# task below is the one `create` runs after its machines exist.
+tasks:
+  - include: deploy.yml

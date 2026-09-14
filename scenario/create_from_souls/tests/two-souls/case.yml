@@ -1,0 +1,114 @@
+name: create_from_souls rolls Redis onto a roster it was handed, and provisions nothing
+
+fixtures:
+  default_destiny_source: "file://../../destiny/{name}"
+  # Two, not one: `expected_hosts` comes from the request here rather than from a count,
+  # and with a single host the assert in deploy.yml passes for a scenario that dropped the
+  # roster entirely.
+  hosts:
+    - sid: redis-demo-1
+      soulprint:
+        network: { primary_ip: 192.168.122.51 }
+        os: { arch: amd64, codename: bookworm }
+    - sid: redis-demo-2
+      soulprint:
+        network: { primary_ip: 192.168.122.52 }
+        os: { arch: amd64, codename: bookworm }
+  vars:
+    install_package:
+      method: package
+      repo_uri:    "https://packages.redis.io/deb"
+      gpg_key_url: "https://packages.redis.io/gpg"
+      gpg_key_sha256: ""
+      version_pin: ""
+    conf_dir: /etc/redis
+    data_dir: /var/lib/redis
+    system_acl_users:
+      - { name: default_admin, perms: "~* &* +@all" }
+      - { name: monitoring, perms: "~* +@read +info -@dangerous" }
+    memory_reserve_percent: 75
+    redis_config:
+      maxmemory:        "256mb"
+      maxmemory-policy: noeviction
+      maxclients:       10000
+      timeout:          300
+    persistence_presets:
+      rdb:
+        save:       "900 1 300 10 60 10000"
+        appendonly: "no"
+  input:
+    owners: [team-cache]
+    environment: dev
+    version: "8.10.1"
+    hosts: [redis-demo-1, redis-demo-2]
+    # One operator account, unlike the create case: it is what puts the live ACL step
+    # under test at all — the loop is over `input.users` and with an empty list the step
+    # renders nothing and the case would pass on a scenario that lost it.
+    users:
+      - { name: app, perms: "~app:* +@read +@write -@dangerous", state: "on" }
+
+mocks:
+  register:
+    system_acl_users:
+      effective:
+        - { name: default_admin, password: default-admin-secret-pass }
+        - { name: monitoring,    password: monitoring-secret-pass }
+    redis_users:
+      effective:
+        - { name: app, password: app-secret-pass }
+
+assert:
+  # THE SUBJECT OF THIS CASE. Every step of provision.yml must be absent: a
+  # create_from_souls that included that body would mint a token for a host that already
+  # has a seed and redeem it, which breaks the host it was handed. The list is the four
+  # steps in full rather than the file name, because `include:` is what would bring them
+  # back and nothing here reads file names.
+  task_absent:
+    - module: vmlocal.vm.created
+    - module: core.bootstrap.issued
+    - module: core.ssh.run
+    - module: core.soul.registered
+  task_present:
+    - module: core.pkg.installed
+      params_subset:
+        name: redis-server
+        # Composed per host by the destiny from the HOST's codename, not by the scenario.
+        version: "6:8.10.1-1rl1~bookworm1"
+    - module: core.file.rendered
+      params_subset:
+        path: /etc/redis/redis.conf
+    - module: redis.instance.pinged
+      params_subset:
+        addr: "127.0.0.1:6379"
+        username: default_admin
+    - module: redis.user.present
+      params_subset:
+        addr: "127.0.0.1:6379"
+        username: default_admin
+        name: app
+        perms: "~app:* +@read +@write -@dangerous"
+        state: "on"
+  # In full against state_schema: state_after compares by subset, so a field left out
+  # here is a write task nobody will notice went missing.
+  state_after:
+    owners: [team-cache]
+    environment: dev
+    redis_version: "8.10.1"
+    operational_status: running
+    # The size of the roster, not a number the caller passed — this scenario has no
+    # machine_count at all.
+    machine_count: 2
+    memory_mb: 0
+    persistence: rdb
+    redis_config:
+      maxmemory:        "256mb"
+      maxmemory-policy: noeviction
+      maxclients:       10000
+      timeout:          300
+      save:             "900 1 300 10 60 10000"
+      appendonly:       "no"
+    redis_users:
+      - { name: app, perms: "~app:* +@read +@write -@dangerous", state: "on" }
+    system_acl_users:
+      - { name: default_admin }
+      - { name: monitoring }

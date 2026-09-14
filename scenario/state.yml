@@ -36,11 +36,13 @@
     field: redis_config
     value: "${ compute.redis_config }"
 
+# compute, not `input.machine_count`: the field is the size of the composition, and only
+# `create` is given that as a number — `create_from_souls` is given the hosts themselves.
 - name: Record the machine count
   module: core.state.set
   params:
     field: machine_count
-    value: "${ int(input.machine_count) }"
+    value: "${ compute.expected_hosts }"
 
 - name: Record the memory budget
   module: core.state.set
