@@ -16,17 +16,17 @@ vm_profile: redis-small
 # `namespace` is the scope label stamped into the domain metadata: it is what keeps
 # `probed` and `destroyed` away from machines this artefact did not create.
 #
-# `network_id` is the UUID of a libvirt network — libvirt networks carry real UUIDs, so
-# this is 1:1 with the cloud's field. `virsh -c qemu:///system net-uuid default` prints
-# the one for the default NAT network.
+# `network_id` is the UUID of a libvirt network — libvirt networks carry real UUIDs.
+# `virsh -c qemu:///system net-uuid default` prints the one for the default NAT network.
 #
 # The image is named rather than given as a UUID: a name survives a re-staged catalogue,
 # a UUID does not. Specifically debian-12, because destiny composes the apt pin as
 # `…-1rl1~<codename>1` from the HOST's codename, so a debian-13 image surfaces the
 # mismatch as apt failing on the machine rather than here.
 #
-# `rm_external_id` does NOT live in a profile row: a profile describes the hardware, the
-# same for every incarnation of its size. It is merged in by provision.yml.
+# ★ The set of keys below is CLOSED: vmlocal refuses a profile key it does not read
+# rather than ignoring it, so a field copied in from another provider's spec fails at
+# validation instead of building a machine without the property it promised.
 vm_profiles:
   redis-small:
     namespace:      soul-stack-services
@@ -36,18 +36,13 @@ vm_profiles:
     ram_size:       2147483648
     boot_disk_size: 10737418240
 
-# The owning system in a Resource Manager. vmlocal accepts this field, records it in the
-# domain metadata and does nothing with it — it is required anyway, because the cloud
-# requires it, and a profile accepted locally has to be accepted by the cloud too.
-rm_external_id: soul-stack-example
-
 # The path has to live in vars, never in input: `vault()` takes a path only from a trusted
 # context, because a path from operator input is reading someone else's secret by the
 # operator's choice (docs/templating.md → "path-injection").
 #
-# For vmlocal: `endpoint` is the libvirt connection URI (qemu:///system); `key_id` and
-# `secret` are accepted and unused — a local libvirtd authenticates by the permissions on
-# its socket. They are required because the `vm` contract requires them.
+# For vmlocal the only field read here is `endpoint`, the libvirt connection URI
+# (qemu:///system). There is no credential beside it: a local libvirtd authenticates by
+# the permissions on its socket, so vmlocal declares no key and refuses one.
 machine_credentials_path: secret/soul-stack-services/redis/machine
 
 # The whole cloud-init user-data document, held in Vault because it carries the machine's

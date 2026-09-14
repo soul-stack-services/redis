@@ -14,8 +14,8 @@ types:
       perms:
         # A token-SHAPE filter, not an ACL parser: what the rights mean is Redis's
         # business at ACL SETUSER, and which tokens are forbidden on substance is the
-        # scenario's `validate:`. The pattern is deliberately looser than the one WB's
-        # service carries — an example that ships an unreadable regex teaches the regex.
+        # scenario's `validate:`. The pattern is deliberately looser than a production
+        # service's — an example that ships an unreadable regex teaches the regex.
         type: string
         required: true
         pattern: "^[A-Za-z0-9 ~&%@:_.*?+|<>#!$^(){}\\[\\]/=-]+$"

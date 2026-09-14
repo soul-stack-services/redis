@@ -27,9 +27,10 @@
 # ★ THE MACHINE PROVIDER IS ADDRESSED BY ITS REGISTRATION ALIAS. A plugin artefact
 # carries no name of its own — address level 1 is whatever the operator writes in
 # `keeper.yml::plugins.soul_modules[].name`. This service says `vmlocal` because that is
-# the provider it was written against. Pointing it at another provider that speaks the
-# same `vm` contract is one edit to that word here plus the matching alias in keeper.yml;
-# nothing else in this repository moves. See README → "Running this against a cloud".
+# the provider it was written against. Another provider is a different contract, not
+# just a different alias: since NIM-873 vmlocal declares the parameter surface libvirt
+# can answer for rather than mirroring a cloud's, so pointing this at a cloud means
+# editing the params too. See README → "Running this against a cloud".
 #
 # ⚠ A green `make validate` proves nothing about the steps in THIS file: the linter walks
 # tasks in the AST of the document it was given and does not see them through `include:`
@@ -77,12 +78,10 @@
     # resolve one against. The owning system is layered on top of the hardware profile:
     # the profile describes the machine, the same for every incarnation of its size.
     #
-    # ★ vmlocal REFUSES `set_external_ip`, `external_ip_id`, `anti_affinity`, `cluster`
-    # and `image_version` rather than ignoring them, so a profile carrying any of them
-    # fails here instead of quietly building a machine without the property it promised.
-    profile: >-
-      ${ merge(vars.vm_profiles[vars.vm_profile],
-               {'rm_external_id': vars.rm_external_id}) }
+    # ★ vmlocal's profile is a CLOSED set of fields: a key it does not read is REFUSED
+    # rather than ignored, so a profile carrying a stray key fails here instead of
+    # quietly building a machine without the property that key promised.
+    profile: "${ vars.vm_profiles[vars.vm_profile] }"
     count: "${ compute.expected_hosts }"
     # Batch identity: machines are named <name>-<N> and labelled with it, so a rerun of
     # the same incarnation adopts its own batch instead of spawning new machines.
@@ -93,13 +92,10 @@
     # an empty CA set is an error, never a blind connect. What the document has to
     # contain is in README → "What the stand has to supply".
     userdata: "${ vault(vars.machine_userdata_ref) }"
-    # `endpoint` is the one connection param that carries a local meaning: for vmlocal it
-    # is the libvirt connection URI. `key_id` and `secret` are accepted and unused by a
-    # local hypervisor, which authenticates by the permissions on its socket — they are
-    # required because the `vm` contract requires them.
+    # `endpoint` is the libvirt connection URI. There is no credential beside it:
+    # a local libvirtd authenticates by the permissions on its socket, so vmlocal
+    # declares no key and would refuse one as `module.unknown_param`.
     endpoint: "${ vault(vars.machine_credentials_path + '#endpoint') }"
-    key_id:   "${ vault(vars.machine_credentials_path + '#key_id') }"
-    secret:   "${ vault(vars.machine_credentials_path + '#secret') }"
 
 # Only keeper mints a token: minting is an INSERT of a pending Soul plus the token hash
 # in one PG transaction, and a plugin has neither the database nor the issuer.

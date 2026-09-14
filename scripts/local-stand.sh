@@ -123,12 +123,10 @@ put("keeper/bootstrap-ca", {"ca": (stand / "tls" / "vault-ca.crt").read_text()})
 # field name `public_key` is what LoadHostCA reads.
 put("keeper/ssh-host-ca", {"public_key": rd("host_ca.pub")})
 put("soul-stack-services/redis/machine", {
-    # For vmlocal this is the libvirt connection URI. key_id and secret are accepted and
-    # unused — a local libvirtd authenticates by the permissions on its socket — and are
-    # required because the vm contract requires them.
+    # For vmlocal this is the libvirt connection URI, and it is the only connection
+    # value there is: a local libvirtd authenticates by the permissions on its socket,
+    # so vmlocal declares no credential and refuses one (NIM-873).
     "endpoint":  "qemu:///system",
-    "key_id":    "unused-by-vmlocal",
-    "secret":    "unused-by-vmlocal",
     "user_data": user_data,
 })
 PY

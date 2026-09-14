@@ -14,8 +14,6 @@ fixtures:
   vault:
     secret/soul-stack-services/redis/machine:
       endpoint: "qemu:///system"
-      key_id:   "unused-local"
-      secret:   "unused-local"
       user_data: |
         #cloud-config
         disable_root: false
@@ -46,7 +44,6 @@ fixtures:
         cpu_size:       2
         ram_size:       2147483648
         boot_disk_size: 10737418240
-    rm_external_id: soul-stack-example
     machine_credentials_path: secret/soul-stack-services/redis/machine
     machine_userdata_ref: secret/soul-stack-services/redis/machine#user_data
     ssh_provider: static
@@ -112,9 +109,6 @@ assert:
       params_subset:
         profile:
           namespace:      soul-stack-services
-          # Merged on top of the profile row. The provider requires it even though it is
-          # inert locally, because the cloud requires it.
-          rm_external_id: soul-stack-example
           image_name:     debian-12
           network_id:     70b148c1-76bb-46c7-8f58-3f81783ac7a0
           cpu_size:       2
@@ -123,8 +117,6 @@ assert:
         count: 1
         name: create
         endpoint: "qemu:///system"
-        key_id:   "unused-local"
-        secret:   "unused-local"
     - module: core.bootstrap.issued
       params_subset:
         sids: [redis-demo-1]

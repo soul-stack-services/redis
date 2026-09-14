@@ -81,18 +81,25 @@ whatever an operator writes in `keeper.yml::plugins.soul_modules[].name`, and it
 nowhere in the artefact's bytes. This service names `vmlocal` because that is the provider
 it was written against and run against.
 
-So there are two ways to point it elsewhere, and both are one line:
+Pointing it at a cloud is an address change **plus a params change**, and the second
+half is the one that costs:
 
-- register a cloud provider that speaks the same `vm` object and the same
-  `created/destroyed/probed/resized` actions **under the alias `vmlocal`** — this
-  repository does not change at all;
-- or change that one `module:` line and the matching alias in `keeper.yml`.
+- the address: either register the cloud provider **under the alias `vmlocal`**, or
+  change that one `module:` line and the matching alias in `keeper.yml`;
+- the params: param-level strictness refuses a call carrying a key the state does not
+  declare, and two providers do not declare the same keys. `vmlocal` declares the
+  surface libvirt can answer for — `endpoint` and `namespace`, and a closed profile
+  vocabulary — with no credential among them, because a local libvirtd authenticates by
+  the permissions on its socket. A cloud will want an API key and a pair of PEMs that
+  vmlocal would refuse as `module.unknown_param`, and vice versa.
 
-What must NOT change for either to work is the parameter surface: param-level strictness
-refuses a call carrying a key the state does not declare. `vmlocal` holds itself to the WB
-cloud's surface key for key, and a test in that artefact reddens when the two drift.
+> Until NIM-873 the second half was free: `vmlocal` mirrored a cloud provider's
+> parameter surface key for key, so registering it under that provider's alias ran that
+> provider's scenario unmodified. The mirror is gone — `vmlocal` is a libvirt plugin
+> with its own contract, and the mirror's cost was five params it declared, required and
+> could not use.
 
-The values in [`vars/50-machines.yaml`](vars/50-machines.yaml) do change — `endpoint`
+The values in [`vars/50-machines.yaml`](vars/50-machines.yaml) change too — `endpoint`
 becomes a compute API rather than a libvirt URI, the profile's `network_id` becomes a
 cloud network. That file is site data: a fleet forks this repository and edits it
 ([ADR-0082](https://github.com/soul-stack/soul-stack/blob/main/docs/adr/0082-service-vars.md)).
