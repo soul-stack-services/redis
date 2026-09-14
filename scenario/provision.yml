@@ -145,6 +145,24 @@
   register: install
   require:
     - tokens
+  # ★ The wait for sshd belongs HERE, and a live run is what showed it. A machine is
+  # reported ready on a DHCP lease carrying an address and a hostname — the cloud's own
+  # predicate, and the earliest moment the machine can be named — but sshd comes up later
+  # in the boot. The engine does not bridge that gap on this transport: `dialTeleport` is
+  # wrapped in a bounded retry, `dialDirect` is not, so the first connect to a fresh VM
+  # failed the whole run with `connection refused` about ten seconds after the lease.
+  #
+  # A bare retry, with no `until:` over `register.self.*`: a plugin failure carries no
+  # Output, and such a predicate would fail with `no such key` on exactly the failure the
+  # retry exists for.
+  #
+  # Retrying the whole step is safe because every command is idempotent and the redeem
+  # stands behind the seed-certificate guard, so a host that got through on an earlier
+  # attempt is not onboarded twice. The cost is honest: a step failing for a reason that
+  # is NOT a slow boot — a broken command — still burns the whole window before it says so.
+  retry:
+    count: 20
+    delay: 10s
   params:
     hosts: >-
       ${ register.tokens.hosts.map(t, has(t.onboarded) && t.onboarded
