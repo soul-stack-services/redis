@@ -1,0 +1,237 @@
+name: create raises a machine, adds it to keeper and rolls Redis onto it
+
+fixtures:
+  default_destiny_source: "file://../../destiny/{name}"
+  # The roster is static in L0: refresh_soulprint is a stub here, so the machine the
+  # provider "created" is put into the composition by hand.
+  hosts:
+    - sid: redis-demo-1
+      soulprint:
+        network: { primary_ip: 192.168.122.50 }
+        os: { arch: amd64, codename: bookworm }
+  # Connection params are ordinary step params that render reads through vault(), so in
+  # L0 they arrive from here. The paths are the ones in vars/50-machines.yaml.
+  vault:
+    secret/soul-stack-services/redis/machine:
+      endpoint: "qemu:///system"
+      key_id:   "unused-local"
+      secret:   "unused-local"
+      user_data: |
+        #cloud-config
+        disable_root: false
+    secret/keeper/bootstrap-ca:
+      ca: |
+        -----BEGIN CERTIFICATE-----
+        ZmFrZS1rZWVwZXItY2E=
+        -----END CERTIFICATE-----
+  vars:
+    install_package:
+      method: package
+      repo_uri:    "https://packages.redis.io/deb"
+      gpg_key_url: "https://packages.redis.io/gpg"
+      gpg_key_sha256: ""
+      version_pin: ""
+    conf_dir: /etc/redis
+    data_dir: /var/lib/redis
+    system_acl_users:
+      - { name: default_admin, perms: "~* &* +@all" }
+      - { name: monitoring, perms: "~* +@read +info -@dangerous" }
+    memory_reserve_percent: 75
+    vm_profile: redis-small
+    vm_profiles:
+      redis-small:
+        namespace:      soul-stack-services
+        image_name:     debian-12
+        network_id:     70b148c1-76bb-46c7-8f58-3f81783ac7a0
+        cpu_size:       2
+        ram_size:       2147483648
+        boot_disk_size: 10737418240
+    rm_external_id: soul-stack-example
+    machine_credentials_path: secret/soul-stack-services/redis/machine
+    machine_userdata_ref: secret/soul-stack-services/redis/machine#user_data
+    ssh_provider: static
+    ssh_user: root
+    soul_binary_url: http://192.168.122.1:8099/soul
+    # The ports are DIFFERENT on purpose: with equal ones the case would also pass on a
+    # config that derived both from a single address — which is exactly the mistake that
+    # produced `Unimplemented: method EventStream` live.
+    keeper_endpoint_host:     192.168.122.1
+    keeper_bootstrap_port:    9442
+    keeper_event_stream_port: 9443
+    keeper_ca_path: secret/keeper/bootstrap-ca
+    onboarding_timeout: 8m
+    redis_config:
+      maxmemory:        "256mb"
+      maxmemory-policy: noeviction
+      maxclients:       10000
+      timeout:          300
+    persistence_presets:
+      rdb:
+        save:       "900 1 300 10 60 10000"
+        appendonly: "no"
+  input:
+    owners: [team-cache]
+    environment: dev
+    version: "8.10.1"
+    users: []
+
+# L0 executes no modules — what a register would have returned is stated here. `vms` has
+# the shape the provider really returns: flat sid/vm_id/primary_ip and NO bootstrap_token
+# (a separate step mints it, and its register is below).
+mocks:
+  register:
+    vms:
+      hosts:
+        - { sid: redis-demo-1, vm_id: 11111111-1111-1111-1111-111111111111, primary_ip: 192.168.122.50 }
+    tokens:
+      hosts:
+        - sid: redis-demo-1
+          bootstrap_token: tok-vm1
+          expires_at: "2026-09-14T12:00:00Z"
+          created: true
+          reissued: false
+    system_acl_users:
+      effective:
+        - { name: default_admin, password: default-admin-secret-pass }
+        - { name: monitoring,    password: monitoring-secret-pass }
+    redis_users:
+      effective: []
+
+assert:
+  task_absent:
+    # The install used to be written by `core.bootstrap.delivered` until it was removed
+    # from the engine (NIM-834). The guard stays now that the install is written again:
+    # the address is gone, keeper refuses it, and a quiet return would be a red run rather
+    # than a red test.
+    - module: core.bootstrap.delivered
+  task_present:
+    # The subject is the EXPANDED object: a profile NAME in this param is refused by the
+    # provider (`profile is required and must be an object`), and swapping the object back
+    # for a string is the regression this case is here for.
+    - module: vmlocal.vm.created
+      params_subset:
+        profile:
+          namespace:      soul-stack-services
+          # Merged on top of the profile row. The provider requires it even though it is
+          # inert locally, because the cloud requires it.
+          rm_external_id: soul-stack-example
+          image_name:     debian-12
+          network_id:     70b148c1-76bb-46c7-8f58-3f81783ac7a0
+          cpu_size:       2
+          ram_size:       2147483648
+          boot_disk_size: 10737418240
+        count: 1
+        name: create
+        endpoint: "qemu:///system"
+        key_id:   "unused-local"
+        secret:   "unused-local"
+    - module: core.bootstrap.issued
+      params_subset:
+        sids: [redis-demo-1]
+    # The subject is ALL EIGHT COMMANDS in full, not the fact of the step: the engine runs
+    # them but does not read them, and each mistake yields a host that SILENTLY never
+    # onboards — what turns red is the wait below, a minute later and on someone else's
+    # subject. `params_subset` compares a key's value whole, so a dropped or rewritten
+    # command does not pass here.
+    #
+    # Four of the mistakes were bought by live runs: the token placed but not redeemed;
+    # the redeem without the guard on the seed certificate; a bare `start` instead of
+    # `daemon-reload && enable`; and both soul.yml ports derived from one address, so soul
+    # dials EventStream on the bootstrap port and gets `Unimplemented: method
+    # EventStream`. Hence two ports below, and DIFFERENT.
+    - module: core.ssh.run
+      params_subset:
+        ssh_provider: static
+        ssh_user: root
+        hosts:
+          - sid: redis-demo-1
+            bootstrap_token: tok-vm1
+            primary_ip: 192.168.122.50
+        steps:
+          - run: "install -d -m 0755 /var/lib/soul-stack /var/lib/soul-stack/modules && install -d -m 0700 /etc/soul /etc/soul/tls /var/lib/soul-stack/seed"
+          - run: "umask 077 && cat > /etc/soul/tls/keeper-ca.pem && chmod 0600 /etc/soul/tls/keeper-ca.pem"
+            stdin: |
+              -----BEGIN CERTIFICATE-----
+              ZmFrZS1rZWVwZXItY2E=
+              -----END CERTIFICATE-----
+          - run: "cat > /etc/soul/soul.yml && chmod 0644 /etc/soul/soul.yml"
+            stdin: |
+              # Written by the redis service's create scenario; hand edits are overwritten
+              # by the next run.
+              paths:
+                modules: /var/lib/soul-stack/modules
+                seed:    /var/lib/soul-stack/seed
+              keeper:
+                endpoints:
+                  - host: 192.168.122.1
+                    event_stream_port: 9443
+                    bootstrap_port: 9442
+                tls:
+                  ca: /etc/soul/tls/keeper-ca.pem
+          - run: "cat > /etc/systemd/system/soul.service && chmod 0644 /etc/systemd/system/soul.service"
+            stdin: |
+              [Unit]
+              Description=Soul Stack agent
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              # Type=notify + WatchdogSec: the unit's start finishes on READY=1, and an agent
+              # that hangs — alive but executing nothing — is restarted by systemd. There is
+              # no other supervision on the VM.
+              Type=notify
+              NotifyAccess=main
+              ExecStart=/usr/local/bin/soul run --config /etc/soul/soul.yml
+              ExecReload=/bin/kill -HUP $MAINPID
+              Restart=on-failure
+              RestartSec=5s
+              WatchdogSec=60s
+              TimeoutStartSec=90s
+
+              [Install]
+              WantedBy=multi-user.target
+          - run: "curl -fsSL http://192.168.122.1:8099/soul -o /usr/local/bin/soul.new && chmod 0755 /usr/local/bin/soul.new && mv -f /usr/local/bin/soul.new /usr/local/bin/soul"
+          - run: "umask 077 && cat > /etc/soul/token && chmod 0400 /etc/soul/token"
+            stdin_from: bootstrap_token
+          - run: 'test -e /var/lib/soul-stack/seed/current/cert.pem || SOUL_BOOTSTRAP_TOKEN="$(cat /etc/soul/token)" /usr/local/bin/soul init --config /etc/soul/soul.yml'
+          - run: "systemctl daemon-reload && systemctl enable --now soul"
+    - module: core.soul.registered
+      params_subset:
+        sid: [redis-demo-1]
+        await_online: true
+        refresh_soulprint: true
+    - module: core.pkg.installed
+      params_subset:
+        name: redis-server
+        version: "6:8.10.1-1rl1~bookworm1"
+    - module: core.file.rendered
+      params_subset:
+        path: /etc/redis/redis.conf
+    - module: redis.instance.pinged
+      params_subset:
+        addr: "127.0.0.1:6379"
+        username: default_admin
+  # Listed IN FULL against state_schema rather than selectively: state_after compares by
+  # subset, so a field omitted here is a write task nobody will notice is missing.
+  state_after:
+    owners: [team-cache]
+    environment: dev
+    redis_version: "8.10.1"
+    operational_status: running
+    machine_count: 1
+    memory_mb: 0
+    persistence: rdb
+    redis_config:
+      maxmemory:        "256mb"
+      maxmemory-policy: noeviction
+      maxclients:       10000
+      timeout:          300
+      save:             "900 1 300 10 60 10000"
+      appendonly:       "no"
+    redis_users: []
+    # Only the name reaches state: perms are policy in vars rather than a fact of the
+    # incarnation, and the password is declared `type: secret` and lives in Vault
+    # ([ADR-0083] §1).
+    system_acl_users:
+      - { name: default_admin }
+      - { name: monitoring }

@@ -1,0 +1,10 @@
+# A distribution carries only the version its release froze on (Debian 12 — 7.0.15),
+# which is not in the scenario's enum, so the official Redis repository is the default.
+# destiny receives this map as ONE value — it cannot be overridden key by key, and a
+# fleet with its own mirror replaces the whole map.
+install_package:
+  method: package
+  repo_uri:    "https://packages.redis.io/deb"
+  gpg_key_url: "https://packages.redis.io/gpg"
+  gpg_key_sha256: ""
+  version_pin: ""

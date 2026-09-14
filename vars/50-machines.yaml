@@ -1,0 +1,98 @@
+# Everything about WHERE the machines come from and how the agent reaches keeper. This
+# layer is site data, not service logic — it is the file a fleet edits when it forks this
+# repository.
+
+# Which row of vm_profiles the create scenario uses. One size here on purpose: sizing is
+# not what this example is about, and a second profile would only be a second copy of the
+# same six keys.
+vm_profile: redis-small
+
+# The VM spec that travels into the `profile` param of the machine provider. The provider
+# takes an OBJECT, not a profile name: there is no Profile registry left to resolve one.
+#
+# ★ THE UNITS DIFFER AND CAN BE SWAPPED SILENTLY: cpu_size is cores (dimensionless),
+# ram_size and boot_disk_size are BYTES. 1 GiB = 1073741824, 10 GiB = 10737418240.
+#
+# `namespace` is the scope label stamped into the domain metadata: it is what keeps
+# `probed` and `destroyed` away from machines this artefact did not create.
+#
+# `network_id` is the UUID of a libvirt network — libvirt networks carry real UUIDs, so
+# this is 1:1 with the cloud's field. `virsh -c qemu:///system net-uuid default` prints
+# the one for the default NAT network.
+#
+# The image is named rather than given as a UUID: a name survives a re-staged catalogue,
+# a UUID does not. Specifically debian-12, because destiny composes the apt pin as
+# `…-1rl1~<codename>1` from the HOST's codename, so a debian-13 image surfaces the
+# mismatch as apt failing on the machine rather than here.
+#
+# `rm_external_id` does NOT live in a profile row: a profile describes the hardware, the
+# same for every incarnation of its size. It is merged in by provision.yml.
+vm_profiles:
+  redis-small:
+    namespace:      soul-stack-services
+    image_name:     debian-12
+    network_id:     70b148c1-76bb-46c7-8f58-3f81783ac7a0
+    cpu_size:       2
+    ram_size:       2147483648
+    boot_disk_size: 10737418240
+
+# The owning system in a Resource Manager. vmlocal accepts this field, records it in the
+# domain metadata and does nothing with it — it is required anyway, because the cloud
+# requires it, and a profile accepted locally has to be accepted by the cloud too.
+rm_external_id: soul-stack-example
+
+# The path has to live in vars, never in input: `vault()` takes a path only from a trusted
+# context, because a path from operator input is reading someone else's secret by the
+# operator's choice (docs/templating.md → "path-injection").
+#
+# For vmlocal: `endpoint` is the libvirt connection URI (qemu:///system); `key_id` and
+# `secret` are accepted and unused — a local libvirtd authenticates by the permissions on
+# its socket. They are required because the `vm` contract requires them.
+machine_credentials_path: secret/soul-stack-services/redis/machine
+
+# The whole cloud-init user-data document, held in Vault because it carries the machine's
+# SSH host private key and the certificate the keeper's host CA signed for it. What it
+# has to contain is in README → "What the stand has to supply".
+machine_userdata_ref: secret/soul-stack-services/redis/machine#user_data
+
+# ⚠ This is the name of an SshProvider PLUGIN from `keeper.yml::plugins.ssh_providers[]`,
+# not the name of a transport. Which transport a Keeper installation uses is
+# `keeper.yml::push.transport` and deliberately not a scenario parameter. On `direct` the
+# step refuses before connecting with `ssh_provider "<name>" not registered`.
+ssh_provider: static
+
+# Who the installer logs in as. The Debian cloud image permits root by key when
+# cloud-init has placed one, which is what the user-data document does.
+ssh_user: root
+
+# ⚠ Where a machine downloads the soul binary from. The engine knows nothing about this
+# address — a site with no way out installs its own mirror here. On a local stand it is
+# whatever serves the binary on the libvirt bridge address.
+#
+# curl runs under system trust rather than pinned to the keeper CA: the artefact mirror's
+# CA is not ours to know, and pinning a foreign CA is a refusal on the first public
+# certificate. Only the artefact host's verification is relaxed — the bootstrap channel
+# is pinned to the keeper CA always.
+soul_binary_url: http://192.168.122.1:8099/soul
+
+# ★ THERE ARE TWO PORTS AND THEY ARE DIFFERENT. Bootstrap is `soul init` (server-only
+# TLS, its own listener), EventStream is `soul run` (mTLS); soul.yml requires both and
+# will not settle for one — a missing port is refused by config parsing
+# (`bootstrap_port_required` / `event_stream_port_required`). Equal ports are legal (a
+# single-port load balancer), which is why neither the engine nor the guard compares them.
+#
+# The host is the address by which a machine can actually reach keeper, not keeper's bind
+# address: the ports must match `keeper.yml::listen.grpc.{bootstrap,event_stream}.addr`,
+# but the host there is its own (`0.0.0.0`). On a local stand this is the libvirt bridge
+# address, and keeper must be a HOST process in the same network namespace — from inside a
+# Docker Desktop container nothing routes to 192.168.122.0/24.
+keeper_endpoint_host:     192.168.122.1
+keeper_bootstrap_port:    9442
+keeper_event_stream_port: 9443
+
+# The keeper CA: soul pins the bootstrap channel with it. The material is PUBLIC but lives
+# in Vault rather than as a string here — rotating a CA must not be a commit to a service.
+keeper_ca_path: secret/keeper/bootstrap-ca
+
+# How long we wait for the created machines to show up in keeper, alive.
+onboarding_timeout: 8m

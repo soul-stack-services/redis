@@ -1,0 +1,236 @@
+# Raises the machines for an incarnation: create VMs → mint them bootstrap tokens →
+# install soul and redeem the tokens → add the hosts to keeper → wait until they are
+# alive. The ordinary rollout (deploy.yml) rides on them afterwards.
+#
+# Installing soul is the SERVICE's policy, and that is not separation for its own sake.
+# `core.bootstrap.delivered` used to do it and was removed in NIM-834 for also deciding
+# WHAT to install: every site installs differently, and the module grew a second
+# transport, a full-install mode, an init phase and a second port, each time meeting a
+# site it did not fit. The engine brought back only the transport to a machine with no
+# agent (`core.ssh.run`, NIM-849); the commands below are ours.
+#
+# THE IMAGE PREPARES NOTHING (NIM-857): `soul.yml`, the keeper CA and the `soul.service`
+# unit are laid down by these same commands, before `soul init`. From the image we need
+# systemd, curl and SSH access; beyond that it can be anything.
+#
+# The bodies of three files go to `stdin:`, never as a command argument — "body in stdin,
+# path in the command" is what the ADR-063 amendment requires of anyone installing a
+# host. For the CA it is also the only working form: the value comes from `vault()`, and
+# a `run:` cell sealed by a secret source is refused by the module before it connects.
+# `stdin:` is a literal, identical on every host; `stdin_from:` names a FIELD of the host
+# record, and only the token lives there. The SID is not written into the config: soul
+# takes it from the hostname (`sid:` in soul.yml is optional), so one config serves the
+# whole batch and no per-host step is needed. The one condition is platform-level
+# (SID = hostname): the machine's hostname must match the SID the provider returned, or
+# keeper rejects a token bound to that SID.
+#
+# ★ THE MACHINE PROVIDER IS ADDRESSED BY ITS REGISTRATION ALIAS. A plugin artefact
+# carries no name of its own — address level 1 is whatever the operator writes in
+# `keeper.yml::plugins.soul_modules[].name`. This service says `vmlocal` because that is
+# the provider it was written against. Pointing it at another provider that speaks the
+# same `vm` contract is one edit to that word here plus the matching alias in keeper.yml;
+# nothing else in this repository moves. See README → "Running this against a cloud".
+#
+# ⚠ A green `make validate` proves nothing about the steps in THIS file: the linter walks
+# tasks in the AST of the document it was given and does not see them through `include:`
+# — silently, without the `plugin_params_unchecked` hint that exists for exactly this
+# case (NIM-779). The params of `vmlocal.vm.created` below are not checked against the
+# artefact's document at all.
+
+# The incarnation name becomes the machine name, and that alphabet is narrower. Checked
+# before creation: otherwise half the batch is built and the rest falls apart in the
+# driver.
+- name: Check the incarnation name fits a machine name
+  assert:
+    that:
+      - "incarnation.id.matches('^[a-z][a-z0-9-]{0,48}[a-z0-9]$')"
+    message: "Rename the incarnation to ^[a-z][a-z0-9-]{0,48}[a-z0-9]$: a leading digit,
+      a trailing hyphen or a length of 51-63 pass incarnation creation and then break in
+      the provider."
+
+# The CA travels to the machine as-is, and an empty Vault field yields an empty file: the
+# write step is GREEN for it (`cat` on empty stdin exits zero), and what turns red is the
+# wait for the host to come online, one step later and with someone else's reason. This
+# check stands before the machines are created: otherwise an empty string in Vault is
+# paid for in hardware.
+#
+# The predicate is word for word the engine's own (`soulinstall.Validate`), and narrowing
+# it to an exact PEM is not worth it: the same check on both ends is worth more than the
+# CSR it would catch here.
+- name: Check the keeper CA is a certificate
+  assert:
+    that:
+      - "vault(vars.keeper_ca_path + '#ca').contains('BEGIN CERTIFICATE')"
+    message: "Vault holds no PEM certificate in field `ca` at vars.keeper_ca_path.
+      Without the CA soul cannot raise its bootstrap channel, and an empty file is
+      written silently."
+
+- name: Create the machines
+  # On a PLUGIN address, `on: keeper` is the only way to write the side: `side: keeper`
+  # is declared in the artefact's stamped document, which is not read from a service
+  # repository at all. On a core address the same key is refused.
+  on: keeper
+  module: vmlocal.vm.created
+  register: vms
+  params:
+    # The provider takes an object, not a profile name — there is no Profile registry to
+    # resolve one against. The owning system is layered on top of the hardware profile:
+    # the profile describes the machine, the same for every incarnation of its size.
+    #
+    # ★ vmlocal REFUSES `set_external_ip`, `external_ip_id`, `anti_affinity`, `cluster`
+    # and `image_version` rather than ignoring them, so a profile carrying any of them
+    # fails here instead of quietly building a machine without the property it promised.
+    profile: >-
+      ${ merge(vars.vm_profiles[vars.vm_profile],
+               {'rm_external_id': vars.rm_external_id}) }
+    count: "${ compute.expected_hosts }"
+    # Batch identity: machines are named <name>-<N> and labelled with it, so a rerun of
+    # the same incarnation adopts its own batch instead of spawning new machines.
+    name: "${ incarnation.id }"
+    # cloud-init user-data, held whole in Vault rather than inline here, because it
+    # carries the machine's SSH host private key and the certificate the keeper's host CA
+    # signed for it. Without a host certificate the direct transport refuses to connect —
+    # an empty CA set is an error, never a blind connect. What the document has to
+    # contain is in README → "What the stand has to supply".
+    userdata: "${ vault(vars.machine_userdata_ref) }"
+    # `endpoint` is the one connection param that carries a local meaning: for vmlocal it
+    # is the libvirt connection URI. `key_id` and `secret` are accepted and unused by a
+    # local hypervisor, which authenticates by the permissions on its socket — they are
+    # required because the `vm` contract requires them.
+    endpoint: "${ vault(vars.machine_credentials_path + '#endpoint') }"
+    key_id:   "${ vault(vars.machine_credentials_path + '#key_id') }"
+    secret:   "${ vault(vars.machine_credentials_path + '#secret') }"
+
+# Only keeper mints a token: minting is an INSERT of a pending Soul plus the token hash
+# in one PG transaction, and a plugin has neither the database nor the issuer.
+#
+# The list is not narrowed to the un-onboarded: a keeper task has no roster, and the
+# repeat pass is held by minting itself — a host already onboarded by this same run comes
+# back as `{sid, onboarded: true}`, with no token (NIM-780). Such a record has no
+# `bootstrap_token` key AT ALL rather than an empty one, so anything reading
+# `register.tokens.hosts` must look at the flag first: reaching for an absent key is an
+# error in CEL, and it would fire on exactly the rerun the pass exists for.
+- name: Mint bootstrap tokens for the machines
+  module: core.bootstrap.issued
+  register: tokens
+  require:
+    - vms
+  params:
+    sids: "${ register.vms.hosts.map(h, h.sid) }"
+
+# Requirements on an installation, each bought by a live run, and none of them met by
+# writing a file with the token in it (ADR-063 amendment 2026-09-09). The first the
+# module enforces itself; the other two it cannot see and will not notice being broken:
+#
+#   1. the token goes to stdin, not argv — a command argument is visible in `ps`, in
+#      `audit.log` and in journald ON THE MACHINE ITSELF. `stdin_from:` names a FIELD of
+#      the host record and the module feeds it to the process; a secret in `run:` is
+#      refused before the connect;
+#   2. the token is REDEEMED, not placed: only `soul init` creates a seed, there is no
+#      soul-side pickup of a token file, and without the redeem soul sits in a restart
+#      loop on "SoulSeed not found". The redeem stands behind a guard on the seed
+#      certificate: the token is single-use, and a repeat without the guard breaks a host
+#      that already onboarded;
+#   3. `daemon-reload && enable`, not a bare `start` — otherwise the unit does not come
+#      back after the VM reboots.
+#
+# Two registers are stitched here: `bootstrap_token` exists only in the minting register,
+# `primary_ip` only in the creation one. The address is needed by keeper under
+# transport=direct, not by the scenario. The `onboarded` branch is the mandatory half of
+# the stitch, not decoration: a converged host has no `bootstrap_token` key at all, and
+# reaching for it in CEL is an error — a rerun would fail right here. The module itself
+# skips such a host by the flag without dialling it.
+- name: Install soul on the machines and redeem their tokens
+  module: core.ssh.run
+  register: install
+  require:
+    - tokens
+  params:
+    hosts: >-
+      ${ register.tokens.hosts.map(t, has(t.onboarded) && t.onboarded
+           ? {'sid': t.sid, 'onboarded': true}
+           : {'sid':             t.sid,
+              'bootstrap_token': t.bootstrap_token,
+              'primary_ip':      register.vms.hosts.filter(v, v.sid == t.sid)[0].primary_ip
+             }) }
+    ssh_provider: "${ vars.ssh_provider }"
+    ssh_user: "${ vars.ssh_user }"
+    steps:
+      # One step creates every directory, so the mode of /etc/soul is stated here rather
+      # than repeated per file — two places owning one mode will drift. Each directory is
+      # named EXPLICITLY, because `install -d` gives parents it creates along the way
+      # 0755 regardless of `-m` (coreutils), and a mode that matters has to be named.
+      - run: "install -d -m 0755 /var/lib/soul-stack /var/lib/soul-stack/modules
+          && install -d -m 0700 /etc/soul /etc/soul/tls /var/lib/soul-stack/seed"
+      - run: "umask 077 && cat > /etc/soul/tls/keeper-ca.pem
+          && chmod 0600 /etc/soul/tls/keeper-ca.pem"
+        stdin: "${ vault(vars.keeper_ca_path + '#ca') }"
+      # ★ There are TWO ports and they are different. Bootstrap is `soul init`
+      # (server-only TLS, its own listener); EventStream is `soul run` (mTLS). soul.yml
+      # demands both and will not settle for one. `seed:` must match the guard on the
+      # seed certificate below: the guard reads <seed>/current/cert.pem, and once the two
+      # drift it stops finding the certificate and redeems the single-use token twice.
+      - run: "cat > /etc/soul/soul.yml && chmod 0644 /etc/soul/soul.yml"
+        stdin: |
+          # Written by the redis service's create scenario; hand edits are overwritten
+          # by the next run.
+          paths:
+            modules: /var/lib/soul-stack/modules
+            seed:    /var/lib/soul-stack/seed
+          keeper:
+            endpoints:
+              - host: ${ vars.keeper_endpoint_host }
+                event_stream_port: ${ vars.keeper_event_stream_port }
+                bootstrap_port: ${ vars.keeper_bootstrap_port }
+            tls:
+              ca: /etc/soul/tls/keeper-ca.pem
+      - run: "cat > /etc/systemd/system/soul.service
+          && chmod 0644 /etc/systemd/system/soul.service"
+        stdin: |
+          [Unit]
+          Description=Soul Stack agent
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          # Type=notify + WatchdogSec: the unit's start finishes on READY=1, and an agent
+          # that hangs — alive but executing nothing — is restarted by systemd. There is
+          # no other supervision on the VM.
+          Type=notify
+          NotifyAccess=main
+          ExecStart=/usr/local/bin/soul run --config /etc/soul/soul.yml
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=on-failure
+          RestartSec=5s
+          WatchdogSec=60s
+          TimeoutStartSec=90s
+
+          [Install]
+          WantedBy=multi-user.target
+      # Downloaded beside and renamed rather than written over: writing to an executable
+      # that is currently running is ETXTBSY, and a rerun over a host that came up but
+      # never reached online is the normal repair path (such a host carries no
+      # `onboarded` flag, so every command runs again). Renaming over a running binary is
+      # allowed: the old inode stays with the process until the unit restarts.
+      - run: "curl -fsSL ${ vars.soul_binary_url } -o /usr/local/bin/soul.new
+          && chmod 0755 /usr/local/bin/soul.new
+          && mv -f /usr/local/bin/soul.new /usr/local/bin/soul"
+      - run: "umask 077 && cat > /etc/soul/token && chmod 0400 /etc/soul/token"
+        stdin_from: bootstrap_token
+      - run: 'test -e /var/lib/soul-stack/seed/current/cert.pem
+          || SOUL_BOOTSTRAP_TOKEN="$(cat /etc/soul/token)"
+          /usr/local/bin/soul init --config /etc/soul/soul.yml'
+      - run: "systemctl daemon-reload && systemctl enable --now soul"
+
+- name: Add the hosts to keeper and wait for them to come alive
+  module: core.soul.registered
+  register: onboarded
+  require:
+    - install
+  params:
+    sid: "${ register.tokens.hosts.map(h, h.sid) }"
+    await_online: true
+    await_timeout: "${ vars.onboarding_timeout }"
+    # Without rebuilding the roster the rollout below would run against the composition
+    # as it was before the machines existed — that is, against nothing.
+    refresh_soulprint: true

@@ -1,0 +1,89 @@
+description: >-
+  Redis on machines this run creates. `create` provisions VMs through a machine
+  provider, installs the Soul agent on them, and rolls out one standalone Redis per
+  machine. The subject of this example is the bootstrap path, not the topology.
+
+# Same dialect as a scenario's `input:` (ADR-0086): obligation lives on the field,
+# there is no `type: object` at the root, no `required` list, no `properties:` wrapper.
+state_schema:
+  owners:
+    type: array
+    required: true
+    items:
+      type: string
+  environment:
+    type: string
+    required: true
+    enum: [dev, stage, prod]
+  redis_version:
+    type: string
+    required: true
+  # redis.conf directives verbatim: the keys are not enumerable ahead of time and the
+  # values are mixed — `maxclients: 10000` next to `appendonly: "yes"`. Hence a boolean
+  # additional_properties rather than a value schema.
+  redis_config:
+    type: object
+    required: true
+    additional_properties: true
+  operational_status:
+    type: string
+    required: true
+    enum: [running, stopped]
+  machine_count:
+    type: integer
+    min: 1
+  memory_mb:
+    type: integer
+    min: 0
+  persistence:
+    type: string
+    enum: [off, aof_1sec, rdb, rdb_aof_1sec]
+
+  # Element shape is the same `AclUser` the scenario input takes, with `password` added
+  # on top — allowed only in state_schema (ADR-0086, a pinpoint exception to ADR-062).
+  #
+  # `type: secret` ([ADR-0083] §1): the value lives in Vault under a path keeper derives
+  # itself from (service, incarnation, redis_users, name). The path is never written by
+  # hand; `soul-lint list-secret-paths` prints it. `key: name` names the neighbouring
+  # property that serves as the last path segment.
+  redis_users:
+    type: array
+    items:
+      $type: AclUser
+      properties:
+        password:
+          type: secret
+          key: name
+          label: "Redis user password"
+
+  # Inline rather than `$type: AclUser`: a service account carries no perms and no state
+  # in this record — the shape is different, and reusing the type to save lines would be
+  # a lie. The set is written, not recomputed from vars on every run: an operator who
+  # edits vars after create must not silently reassign the account a live client uses.
+  system_acl_users:
+    type: array
+    items:
+      type: object
+      additional_properties: false
+      properties:
+        name:
+          type: string
+          required: true
+        password:
+          type: secret
+          key: name
+          label: "Redis service account password"
+
+destiny:
+  - { name: redis, ref: v1.0.0 }
+
+# One line per ARTEFACT, and the name is the REGISTRATION ALIAS from
+# `keeper.yml::plugins.soul_modules[]` (NIM-829). This declares a DEPENDENCY, not a
+# source: where to fetch it from, and at which sha256, is keeper's decision.
+#
+# ★ The machine provider must NOT appear here. A record in `modules[]` synthesises a
+# Soul-side `core.module.installed` (ADR-065), which would be scheduled before the
+# machines exist — with a roster of zero. It is keeper-side, and the operator registers
+# it in `keeper.yml::plugins.soul_modules[]`. Guard — scripts/validate.sh.
+modules:
+  - { name: redis, ref: v1.0.0 }

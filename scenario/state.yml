@@ -1,0 +1,71 @@
+# Writing the incarnation's state: per ADR-0084 each field is its own `core.state.<verb>`
+# task, and `core.state.set` takes exactly one `field` and one `value`.
+#
+# ⚠️ A file's place in the task list does NOT decide when the write happens: tasks are
+# stratified by their dependencies on `register` (ADR-056(b)), and a write that reads no
+# register lands in Passage 0. That is correct for the records below — they fix what the
+# operator ASKED FOR, and a failed run leaves the request recorded. The one exception is
+# operational_status, whose dependency is stated explicitly.
+#
+# Secrets are not here: the two `core.state.present` steps in deploy.yml write them where
+# they become known.
+
+- name: Record the owners
+  module: core.state.set
+  params:
+    field: owners
+    value: "${ input.owners }"
+
+- name: Record the environment
+  module: core.state.set
+  params:
+    field: environment
+    value: "${ input.environment }"
+
+- name: Record the Redis version
+  module: core.state.set
+  params:
+    field: redis_version
+    value: "${ input.version }"
+
+# The same compute that went to destiny through `apply: input:`, so "what was rolled out"
+# and "what was recorded" cannot drift apart by construction.
+- name: Record the Redis configuration
+  module: core.state.set
+  params:
+    field: redis_config
+    value: "${ compute.redis_config }"
+
+- name: Record the machine count
+  module: core.state.set
+  params:
+    field: machine_count
+    value: "${ int(input.machine_count) }"
+
+- name: Record the memory budget
+  module: core.state.set
+  params:
+    field: memory_mb
+    value: "${ int(default(input.memory_mb, 0)) }"
+
+- name: Record the durability mode
+  module: core.state.set
+  params:
+    field: persistence
+    value: "${ input.persistence }"
+
+# "running" is a claim about a FACT, and before the rollout it is false. The reference to
+# register.hosts.alive (the PING probe's register in deploy.yml) moves this task into a
+# Passage after it; dropping the reference means returning to Passage 0 and recording
+# "running" before a single node answered, with the run still green. Guard —
+# scripts/validate.sh.
+- name: Record the operational status
+  module: core.state.set
+  vars:
+    # The value is unused — the reference itself is the point. `has(...)` rather than a
+    # direct read: the stratification edge is built from the text of the reference, while
+    # a value exists only where the probe actually ran (in L0 the registers are mocks).
+    after_ping: "${ has(register.hosts.alive) }"
+  params:
+    field: operational_status
+    value: running

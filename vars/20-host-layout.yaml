@@ -1,0 +1,2 @@
+conf_dir: /etc/redis
+data_dir: /var/lib/redis

@@ -1,0 +1,26 @@
+# The base of redis.conf. The persistence preset, the form fields and redis_settings are
+# layered on top; the order is in compute.redis_config.
+redis_config:
+  maxmemory:        "256mb"
+  maxmemory-policy: noeviction
+  maxclients:       10000
+  timeout:          300
+
+# The share of memory_mb Redis gets, in percent; the rest is left to the OS.
+memory_reserve_percent: 75
+
+persistence_presets:
+  off:
+    save:       ""
+    appendonly: "no"
+  aof_1sec:
+    save:        ""
+    appendonly:  "yes"
+    appendfsync: "everysec"
+  rdb:
+    save:       "900 1 300 10 60 10000"
+    appendonly: "no"
+  rdb_aof_1sec:
+    save:        "900 1 300 10 60 10000"
+    appendonly:  "yes"
+    appendfsync: "everysec"

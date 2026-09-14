@@ -1,0 +1,116 @@
+# The shared part of every create-shaped scenario: input, compute, validate. A scenario
+# pulls it in with `extends: scenario-create` and adds only its own delta — an inherited
+# key cannot be overridden (section_key_conflict).
+#
+# The file name and its place are fixed by the platform: `extends: <name>` reads exactly
+# `<service root>/<name>.yml`, hyphen rather than underscore and no subdirectories
+# (NIM-694). `form:` is not part of it — it is not merged, each scenario draws its own.
+
+input:
+  owners:
+    type: array
+    required: true
+    min_items: 1
+    unique: true
+    items:
+      type: string
+      min_length: 1
+    description: "Who owns the instance: questions about it go to them."
+  environment:
+    type: string
+    required: true
+    enum: [dev, stage, prod]
+    description: "Environment the instance belongs to."
+  version:
+    type: string
+    required: true
+    enum: ["8.10.1", "8.6.6", "7.4.11"]
+    description: >-
+      Redis version. The list is closed: every value is published by the apt repository
+      named in vars.install_package, so all of them install out of the box. Redis 8 and
+      later carry the modules built in, so nothing is fetched from a module mirror.
+  machine_count:
+    type: integer
+    required: false
+    default: 1
+    min: 1
+    max: 3
+    description: >-
+      How many machines to create. Each one gets its own standalone Redis with the same
+      config and users — there is no replication here. Replication, sentinel and cluster
+      are the engine's `examples/service/redis`; this service is about the create path.
+  memory_mb:
+    type: integer
+    required: false
+    min: 64
+    description: >-
+      Memory budget for Redis on the host, MB. maxmemory is a fraction of it
+      (vars.memory_reserve_percent). Unset — maxmemory comes from vars.redis_config.
+  persistence:
+    type: string
+    required: false
+    default: rdb
+    enum: [off, aof_1sec, rdb, rdb_aof_1sec]
+    description: "Durability mode; expands into save/appendonly/appendfsync."
+  maxmemory_policy:
+    type: string
+    required: false
+    default: noeviction
+    enum:
+      - noeviction
+      - allkeys-lru
+      - allkeys-lfu
+      - allkeys-random
+      - volatile-lru
+      - volatile-lfu
+      - volatile-random
+      - volatile-ttl
+    description: "Eviction policy once maxmemory is reached."
+  users:
+    type: array
+    required: true
+    items:
+      $type: AclUser
+    description: "Redis ACL users. Each password is generated into Vault."
+  redis_settings:
+    type: object
+    required: false
+    description: "redis.conf directives verbatim; they override everything else."
+    properties: {}
+    additional_properties:
+      type: string
+
+compute:
+  # The account the service itself connects under — PING here, and anything day-2 would
+  # add later. It is a service account, not an operator's: `validate:` below keeps an
+  # operator from taking the name.
+  admin_user: "${ 'default_admin' }"
+  expected_hosts: "${ int(input.machine_count) }"
+  form_settings: >-
+    ${ merge(
+         has(input.memory_mb)
+           ? { 'maxmemory': string(int(input.memory_mb) * int(vars.memory_reserve_percent) / 100) + 'mb' }
+           : {},
+         { 'maxmemory-policy': input.maxmemory_policy }
+       ) }
+  redis_config: >-
+    ${ merge(
+         vars.redis_config,
+         vars.persistence_presets[input.persistence],
+         compute.form_settings,
+         default(input.redis_settings, {})
+       ) }
+  acl_names: "${ vars.system_acl_users.map(u, u.name) }"
+
+# Rules over the input are evaluated on the request, BEFORE the incarnation is fixed. The
+# context here is input only: no vars, no soulprint (a structural barrier), so anything
+# that needs the service's own composition lives in an `assert:` task in deploy.yml.
+validate:
+  # A token from this list inside perms would either cancel what the step just declared,
+  # or leak in the clear into logs. The rule sits here rather than in types.yml, because
+  # there it would be an edit to state_schema — a rung of the migration ladder for the
+  # sake of an input-only ban.
+  - that: "!has(input.users) || input.users.all(u, !u.perms.matches('(^| )[(]?([<>#!]|(on|off|reset|nopass|resetpass)( |$))'))"
+    message: "perms must not carry a password (>… <… #… !…), reset, on/off or
+      nopass/resetpass — an account's state and password are set by separate parameters.
+      Leave only rights in perms: keys, channels and commands."

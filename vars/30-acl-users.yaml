@@ -1,0 +1,19 @@
+# Service accounts: the ones this service needs to talk to the instance it just built.
+# They are never operator input, and the scenario's `validate:` keeps an operator from
+# taking one of these names.
+#
+# A list, not a dictionary: CEL pulls keys out of a dictionary in arbitrary order, and the
+# account list in state would reshuffle from run to run.
+#
+# Literals only here: vars layers are parsed as plain YAML and have no CEL phase — a
+# "${ … }" string would stay a string. Derived lists live in the scenario's compute.
+
+system_acl_users:
+  # default_admin is the account the service itself connects under: the PING gate, and
+  # anything day-2 would add. Its rights cannot be trimmed.
+  - name: default_admin
+    perms: "~* &* +@all"
+  # A read-only account for a metrics exporter. It is here so the example shows a SET of
+  # service accounts rather than a single privileged one — the shape a real service has.
+  - name: monitoring
+    perms: "~* +@read +info +client|info +latency +ping -@dangerous"

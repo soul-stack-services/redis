@@ -1,0 +1,29 @@
+types:
+  AclUser:
+    type: object
+    additional_properties: false
+    properties:
+      name:
+        type: string
+        required: true
+        pattern: "^[a-z][a-z0-9_-]*$"
+        description: >-
+          ACL user name. It is also the secret's key: keeper derives the Vault path from
+          (service, incarnation, redis_users, name), so the path is never written by hand
+          ([ADR-0083] §1, the `password` field of state_schema).
+      perms:
+        # A token-SHAPE filter, not an ACL parser: what the rights mean is Redis's
+        # business at ACL SETUSER, and which tokens are forbidden on substance is the
+        # scenario's `validate:`. The pattern is deliberately looser than the one WB's
+        # service carries — an example that ships an unreadable regex teaches the regex.
+        type: string
+        required: true
+        pattern: "^[A-Za-z0-9 ~&%@:_.*?+|<>#!$^(){}\\[\\]/=-]+$"
+        description: >-
+          Redis ACL rights on one line, tokens separated by spaces.
+          Example: "~app:* +@read +@write -@dangerous".
+      state:
+        type: string
+        default: "on"
+        enum: [on, off]
+        description: "on — active; off — blocked, the rule is kept."

@@ -1,0 +1,42 @@
+name: create
+create: true
+description: >-
+  Create the machines for Redis and deploy it on them. The scenario raises the hosts
+  itself — there is nothing to pick.
+
+extends: scenario-create
+
+form:
+  sections:
+    - key: ownership
+      title: "Ownership"
+      fields:
+        - { name: owners, label: "Owners", placeholder: "team-cache" }
+        - { name: environment, label: "Environment" }
+    - key: redis
+      title: "Redis"
+      fields:
+        - { name: version, label: "Version" }
+        - { name: machine_count, label: "Machines", placeholder: "1" }
+    - key: resources
+      title: "Resources"
+      fields:
+        - { name: memory_mb, label: "Memory for Redis, MB", placeholder: "512" }
+        - { name: maxmemory_policy, label: "Eviction policy" }
+    - key: durability
+      title: "Durability"
+      fields:
+        - { name: persistence, label: "Persistence" }
+    - key: users
+      title: "Users"
+      fields:
+        - { name: users, label: "ACL users" }
+    - key: config
+      title: "Configuration"
+      collapsed: true
+      fields:
+        - { name: redis_settings, label: "redis.conf directives" }
+
+tasks:
+  - include: provision.yml
+  - include: deploy.yml

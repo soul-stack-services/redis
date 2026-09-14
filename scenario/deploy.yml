@@ -1,0 +1,120 @@
+# Rolls Redis onto the hosts provision.yml just raised. Every machine gets its own
+# standalone instance with the same config and the same users — there is no replication
+# here, and the roster check below is the only topology this service has.
+
+# The truth about the composition is the roster's: the hosts appeared during this very
+# run, so input.machine_count is a request and soulprint.hosts is the outcome.
+- name: Check the roster matches what was asked for
+  assert:
+    that:
+      - "size(soulprint.hosts) == compute.expected_hosts"
+    message: "The number of hosts does not match machine_count: some machines did not
+      come up, or an earlier batch left extra ones behind."
+
+# The check lives here rather than in `validate:`, because there only input is visible and
+# the list of service account names is in service vars.
+- name: Check the operator did not take a service account name
+  assert:
+    that:
+      - "!has(input.users) || input.users.all(u, !(u.name in compute.acl_names))"
+    message: "That name belongs to a service account this service creates for itself.
+      Pick another one."
+
+# Order is set by an edge over `register`: the tasks below read `register.<name>.effective`
+# inside `params:`/`apply: input:`, and the engine moves every consumer into a later
+# Passage. Vault paths are written nowhere — keeper derives them from (service,
+# incarnation, field, key), see `type: secret` in service.yml ([ADR-0083] §1, §4).
+# `present`, not `set`: a rerun must not reissue an account a live client already uses.
+- name: Mint the service accounts' passwords
+  module: core.state.present
+  register: system_acl_users
+  params:
+    field: system_acl_users
+    value: >-
+      ${ compute.acl_names.map(name, {
+           'name':     name,
+           'password': generate_secret({'length': 32, 'charset': 'alphanumeric'})
+         }) }
+
+- name: Mint the operator users' passwords
+  module: core.state.present
+  register: redis_users
+  params:
+    field: redis_users
+    value: >-
+      ${ default(input.users, []).map(u, {
+           'name':     u.name,
+           'perms':    u.perms,
+           'state':    u.state,
+           'password': generate_secret({'length': 32, 'charset': 'alphanumeric'})
+         }) }
+
+- name: Install and start Redis
+  apply:
+    destiny: redis
+    input:
+      version: "${ input.version }"
+      install: "${ vars.install_package }"
+      conf_dir: "${ vars.conf_dir }"
+      data_dir: "${ vars.data_dir }"
+      config: "${ compute.redis_config }"
+      users: >-
+        ${ merge(
+             merge(vars.system_acl_users.map(u, {
+               u.name: {
+                 'perms':    u.perms,
+                 'state':    'on',
+                 'password': merge(register.system_acl_users.effective.map(s, { s.name: s.password }))[u.name]
+               }
+             })),
+             has(input.users)
+               ? merge(input.users.map(u, {
+                   u.name: {
+                     'perms':    u.perms,
+                     'state':    u.state,
+                     'password': merge(register.redis_users.effective.map(r, { r.name: r.password }))[u.name]
+                   }
+                 }))
+               : {}
+           ) }
+      sentinel_enabled: false
+
+- name: Wait for PING
+  module: redis.instance.pinged
+  # The register is needed not here but in state.yml: the operational_status write refers
+  # to register.hosts.alive and is thereby moved into a Passage AFTER this check.
+  register: alive
+  # A bare retry, deliberately: a predicate over `register.self` would cancel the wait on
+  # exactly the failure the wait exists for — a plugin failure carries no Output, so
+  # `until:` over `register.self.*` fails with `no such key` and kills the retry. Guard —
+  # scripts/validate.sh.
+  retry:
+    count: 12
+    delay: 2s
+  params:
+    addr: "127.0.0.1:6379"
+    username: "${ compute.admin_user }"
+    password: "${ merge(register.system_acl_users.effective.map(u, { u.name: u.password }))[compute.admin_user] }"
+
+# The operator's accounts a second time and for real: users.acl is deliberately not among
+# the restart's onchanges, so on a rerun the file is redrawn and Redis does not re-read
+# it. Removing them from the destiny render is NOT an option — the template prints the
+# whole file, and a run with no changes would leave users.acl on disk without them.
+- name: Apply the operator's accounts to the live instance
+  module: redis.user.present
+  # Over input.users, not compute.acl_names: the service accounts do not go through this
+  # step, because the plugin connects AS default_admin — the step creating default_admin
+  # would have nobody to authenticate it. Their path is the file, at startup.
+  loop:
+    items: "${ default(input.users, []) }"
+    as: acl_user
+  params:
+    addr: "127.0.0.1:6379"
+    username: "${ compute.admin_user }"
+    password: "${ merge(register.system_acl_users.effective.map(u, { u.name: u.password }))[compute.admin_user] }"
+    name:  "${ acl_user.name }"
+    perms: "${ acl_user.perms }"
+    state: "${ acl_user.state }"
+    user_password: "${ merge(register.redis_users.effective.map(r, { r.name: r.password }))[acl_user.name] }"
+
+- include: state.yml

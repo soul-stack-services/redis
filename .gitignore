@@ -1,0 +1,3 @@
+# Local stand material: SSH keys, certificates and the rendered cloud-init document.
+# None of it belongs in a service repository.
+/.stand/
