@@ -109,8 +109,6 @@
 - name: Mint bootstrap tokens for the machines
   module: core.bootstrap.issued
   register: tokens
-  require:
-    - vms
   params:
     sids: "${ register.vms.hosts.map(h, h.sid) }"
 
@@ -139,8 +137,6 @@
 - name: Install soul on the machines and redeem their tokens
   module: core.ssh.run
   register: install
-  require:
-    - tokens
   # ★ The wait for sshd belongs HERE, and a live run is what showed it. A machine is
   # reported ready on a DHCP lease carrying an address and a hostname — the cloud's own
   # predicate, and the earliest moment the machine can be named — but sshd comes up later
@@ -239,8 +235,6 @@
 - name: Add the hosts to keeper and wait for them to come alive
   module: core.soul.registered
   register: onboarded
-  require:
-    - install
   params:
     sid: "${ register.tokens.hosts.map(h, h.sid) }"
     await_online: true
